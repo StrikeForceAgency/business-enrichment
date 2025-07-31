@@ -5,20 +5,34 @@ import time
 from serpapi import GoogleSearch
 from utils import validate_email, extract_phone_numbers
 
-# Load the CSV file
-df = pd.read_csv("business_data.csv")
-df.columns = df.columns.str.strip()  # removes accidental leading/trailing spaces
-df.columns = df.columns.str.replace(" ", "_")  # Replaces spaces with underscores
+
+# Load the CSV file (update filename to match your actual CSV)
+CSV_FILENAME = "Filtered_CA_Domestic_Entities.csv"
+try:
+    df = pd.read_csv(CSV_FILENAME)
+except FileNotFoundError:
+    print(f"❌ CSV file '{CSV_FILENAME}' not found. Please place it in the project folder.")
+    exit(1)
+
+# Clean column names
+df.columns = df.columns.str.strip()
+df.columns = df.columns.str.replace(" ", "_")
+
+# Ensure required columns exist
+for col in ["Email", "Phone", "Business_Name", "City"]:
+    if col not in df.columns:
+        df[col] = ""
 
 # Filter records with missing email or phone
 df = df[(df["Email"] == "") | (df["Phone"] == "")]
 print("Columns available:", df.columns.tolist())
 
 # Add new columns for enriched data
-df["Website"] = ""
+if "Website" not in df.columns:
+    df["Website"] = ""
 
 # SerpAPI key setup
-API_KEY = "YOUR_SERPAPI_KEY"
+API_KEY = "YOUR_SERPAPI_KEY"  # Replace with your actual key or use an environment variable
 
 def search_google(query):
     params = {
