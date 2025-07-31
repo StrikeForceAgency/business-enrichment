@@ -1,6 +1,2 @@
 pandas
 requests
-re
-time
-datetime
-csv
