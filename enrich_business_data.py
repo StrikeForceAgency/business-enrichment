@@ -1,91 +1,129 @@
 import pandas as pd
-import requests
 import re
 import time
+import requests
 from serpapi import GoogleSearch
-from utils import validate_email, extract_phone_numbers
 
+# -------------------- Config --------------------
+SERPAPI_KEYS = [
+    "5efe1436193f76d932f7af5d2ba7bf4ab754b7cb8d52a83cc4c6a9cb99fd5034",
+    "52d618127eb70c4941599878cb2079908e466794137f202f64b4358d638dc07e",
+    "62060e899777a0a5a83064f4e4e4ebdcb4499f5e3a9718e31b5516251da09e2e",
+    "945d7450dc430addc1430abcb70ab1c8d35bd919f80d0a1a7724707f1a89d49e",
+    "129ed34d84b00bc9582138c0ba1b3bd8f7f5e0a673c540de485b9ade7e1b3a3e",
+    "c645b316db9f4f1a374988c2fd0b5ea165efe7514c098969bfba89bd9bdd150a"
+]
+APOLLO_API_KEY = "JQkCq0GrscAt9Wg9rNBTgQ"
+INPUT_CSV = "Filtered_CA_Domestic_Entities.csv"
+SLEEP_SECONDS = 2
 
-# Load the CSV file (update filename to match your actual CSV)
-CSV_FILENAME = "Filtered_CA_Domestic_Entities.csv"
-try:
-    df = pd.read_csv(CSV_FILENAME)
-except FileNotFoundError:
-    print(f"❌ CSV file '{CSV_FILENAME}' not found. Please place it in the project folder.")
-    exit(1)
+# -------------------- Regex Patterns --------------------
+EMAIL_REGEX = r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"
+PHONE_REGEX = r"\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}"
 
-# Clean column names
-df.columns = df.columns.str.strip()
-df.columns = df.columns.str.replace(" ", "_")
-
-# Ensure required columns exist
-for col in ["Email", "Phone", "Business_Name", "City"]:
+# -------------------- Load CSV --------------------
+df = pd.read_csv(INPUT_CSV)
+df.columns = df.columns.str.strip().str.replace(" ", "_")
+for col in ["Email", "Phone", "Website"]:
     if col not in df.columns:
         df[col] = ""
 
-# Filter records with missing email or phone
 df = df[(df["Email"] == "") | (df["Phone"] == "")]
-print("Columns available:", df.columns.tolist())
+print(f"🧠 Processing {len(df)} rows")
 
-# Add new columns for enriched data
-if "Website" not in df.columns:
-    df["Website"] = ""
+# -------------------- API Rotation --------------------
+key_index = 0
+def rotate_serpapi_key():
+    global key_index
+    key = SERPAPI_KEYS[key_index]
+    key_index = (key_index + 1) % len(SERPAPI_KEYS)
+    return key
 
-# SerpAPI key setup
-API_KEY = "YOUR_SERPAPI_KEY"  # Replace with your actual key or use an environment variable
-
-def search_google(query):
+# -------------------- Enrichment Functions --------------------
+def search_google(name, city):
+    key = rotate_serpapi_key()
     params = {
         "engine": "google",
-        "q": query,
-        "api_key": API_KEY,
+        "q": f"{name} {city} contact",
+        "api_key": key,
         "num": 5
     }
     try:
-        search = GoogleSearch(params)
-        results = search.get_dict()
-        return results.get("organic_results", [])
+        return GoogleSearch(params).get_dict().get("organic_results", [])
     except Exception as e:
-        print(f"Error searching for '{query}': {e}")
+        print(f"❌ SerpAPI error: {e}")
         return []
 
-# Loop through entries
-for i, row in df.iterrows():
-    name = row["Business_Name"]
-    city = row["City"]
-    query = f"{name} {city} contact"
+def search_apollo(name, city):
+    try:
+        url = "https://api.apollo.io/v1/mixed_people/search"
+        headers = {"Cache-Control": "no-cache"}
+        payload = {
+            "api_key": APOLLO_API_KEY,
+            "q_organization_names": name,
+            "person_locations": city,
+            "page": 1
+        }
+        r = requests.post(url, json=payload, headers=headers)
+        data = r.json()
+        if data.get("people"):
+            person = data["people"][0]
+            return person.get("email"), person.get("phone_numbers", [None])[0]
+    except Exception as e:
+        print(f"❌ Apollo error: {e}")
+    return None, None
 
-    print(f"[{i+1}/{len(df)}] Searching: {query}")
-    results = search_google(query)
+# -------------------- Loop & Enrich --------------------
+successful_count = 0
+failed_rows = []
+
+for i, row in df.iterrows():
+    name, city = row["Business_Name"], row["City"]
+    print(f"[{i+1}/{len(df)}] 🔍 {name}, {city}")
+
+    enriched = False
+    results = search_google(name, city)
 
     for result in results:
-        link = result.get("link", "")
         snippet = result.get("snippet", "")
+        link = result.get("link", "")
+        email_match = re.search(EMAIL_REGEX, snippet)
+        phone_match = re.search(PHONE_REGEX, snippet)
 
-        # Save the first relevant website
-        if df.at[i, "Website"] == "" and "http" in link:
+        if not df.at[i, "Website"] and "http" in link:
             df.at[i, "Website"] = link
+        if not df.at[i, "Email"] and email_match:
+            df.at[i, "Email"] = email_match.group()
+            enriched = True
+        if not df.at[i, "Phone"] and phone_match:
+            df.at[i, "Phone"] = phone_match.group()
+            enriched = True
 
-        # Extract email if missing
-        if df.at[i, "Email"] == "" and "@" in snippet:
-            email_candidates = [word for word in snippet.split() if validate_email(word)]
-            if email_candidates:
-                df.at[i, "Email"] = email_candidates[0]
+    if not enriched:
+        email, phone = search_apollo(name, city)
+        if email:
+            df.at[i, "Email"] = email
+            enriched = True
+        if phone:
+            df.at[i, "Phone"] = phone
+            enriched = True
 
-        # Extract phone if missing
-        if df.at[i, "Phone"] == "":
-            phone_candidates = extract_phone_numbers(snippet)
-            if phone_candidates:
-                df.at[i, "Phone"] = phone_candidates[0]
+    if df.at[i, "Email"]:
+        successful_count += 1
+        if successful_count % 300 == 0:
+            batch_file = f"Enriched_Emails_Batch_{successful_count // 300}.csv"
+            df.to_csv(batch_file, index=False)
+            print(f"💾 Batch saved: {batch_file}")
 
-    # Save enriched data every 300 successful finds
-    if (i + 1) % 300 == 0:
-        df.to_csv("Enriched_Business_Data.csv", index=False)
-        print(f"Saved enriched data after processing {i + 1} entries.")
+    if not enriched:
+        failed_rows.append(i)
 
-    # Respect rate limits
-    time.sleep(2)
+    time.sleep(SLEEP_SECONDS)
 
-# Final save to new file
-df.to_csv("Enriched_Business_Data.csv", index=False)
-print("✅ Enrichment complete. File saved as 'Enriched_Business_Data.csv'")
+# -------------------- Final Save --------------------
+df.to_csv("Enriched_Business_Data_Final.csv", index=False)
+print("✅ Final file saved: Enriched_Business_Data_Final.csv")
+
+if failed_rows:
+    df.loc[failed_rows].to_csv("Failed_Enrichment.csv", index=False)
+    print(f"❗ Failed lookups saved: Failed_Enrichment.csv")
